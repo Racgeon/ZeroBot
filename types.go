@@ -31,6 +31,7 @@ type APIRequest struct {
 	Action string `json:"action"`
 	Params Params `json:"params"`
 	Echo   uint64 `json:"echo"` // 该项不用填写，由Driver生成
+	SelfId int64  `json:"self_id"`
 }
 
 // User is a user on QQ.

@@ -54,6 +54,7 @@ func (ctx *Ctx) CallAction(action string, params Params) APIResponse {
 	req := APIRequest{
 		Action: action,
 		Params: params,
+		SelfId: ctx.Event.SelfID,
 	}
 	rsp, err := ctx.caller.CallApi(req)
 	if err != nil {

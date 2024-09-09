@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"context"
 	"encoding/base64"
 	"io"
 	"net"
@@ -31,14 +32,19 @@ type WSClient struct {
 	seqMap      seqSyncMap
 	Url         string // ws连接地址
 	AccessToken string
-	selfID      int64
+	selfIDs     []int64
+	OnConnect   func(ctx *zero.Ctx)
 }
 
 // NewWebSocketClient 默认Driver，使用正向WS通信
-func NewWebSocketClient(url, accessToken string) *WSClient {
+func NewWebSocketClient(url, accessToken string, selfIDs []int64) *WSClient {
+	if selfIDs == nil {
+		selfIDs = []int64{}
+	}
 	return &WSClient{
 		Url:         url,
 		AccessToken: accessToken,
+		selfIDs:     selfIDs,
 	}
 }
 
@@ -82,16 +88,39 @@ func (ws *WSClient) Connect() {
 		var rsp struct {
 			SelfID int64 `json:"self_id"`
 		}
-		err = ws.conn.ReadJSON(&rsp)
-		if err != nil {
-			log.Warnf("[ws] 与Websocket服务器 %v 握手时出现错误: %v", ws.Url, err)
-			time.Sleep(2 * time.Second) // 等待两秒后重新连接
-			continue
+
+		connected := atomic.Int32{}
+		botCnt := int32(len(ws.selfIDs))
+		if botCnt == 0 {
+			connected.Store(1)
+		} else {
+			connected.Store(botCnt)
 		}
-		ws.selfID = rsp.SelfID
-		zero.APICallers.Store(ws.selfID, ws) // 添加Caller到 APICaller list...
-		log.Infof("[ws] 连接Websocket服务器: %s 成功, 账号: %d", ws.Url, rsp.SelfID)
-		break
+
+		timeout := 5 * time.Second
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		for {
+			select {
+			case <-ctx.Done():
+				cancel()
+				return
+			default:
+				err = ws.conn.ReadJSON(&rsp)
+				if err != nil {
+					log.Warnf("[ws] 与Websocket服务器 %v 握手时出现错误: %v", ws.Url, err)
+					time.Sleep(2 * time.Second) // 等待两秒后重新连接
+					continue
+				}
+
+				selfId := rsp.SelfID
+				zero.APICallers.Store(selfId, ws) // 添加Caller到 APICaller list...
+				log.Infof("[ws] 连接Websocket服务器: %s 成功, 账号: %d", ws.Url, selfId)
+				connected.Add(-1)
+				if connected.Load() == 0 {
+					cancel()
+				}
+			}
+		}
 	}
 }
 
@@ -100,7 +129,9 @@ func (ws *WSClient) Listen(handler func([]byte, zero.APICaller)) {
 	for {
 		t, payload, err := ws.conn.ReadMessage()
 		if err != nil { // reconnect
-			zero.APICallers.Delete(ws.selfID) // 断开从apicaller中删除
+			for _, selfID := range ws.selfIDs {
+				zero.APICallers.Delete(selfID) // 断开从apicaller中删除
+			}
 			log.Warn("[ws] Websocket服务器连接断开...")
 			time.Sleep(time.Millisecond * time.Duration(3))
 			ws.Connect()
@@ -126,6 +157,12 @@ func (ws *WSClient) Listen(handler func([]byte, zero.APICaller)) {
 			continue
 		}
 		if rsp.Get("meta_event_type").Str == "heartbeat" { // 忽略心跳事件
+			continue
+		}
+		if rsp.Get("sub_type").Str == "connect" { //处理连接事件
+			selfId := rsp.Get("self_id").Int()
+			zero.APICallers.Store(selfId, ws) // 添加Caller到 APICaller list...
+			log.Infof("[ws] 连接Websocket服务器: %s 成功, 账号: %d", ws.Url, selfId)
 			continue
 		}
 		log.Debug("[ws] 接收到事件: ", helper.BytesToString(payload))
