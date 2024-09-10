@@ -185,6 +185,9 @@ func (ws *WSClient) Listen(handler func([]byte, zero.APICaller)) {
 			handler(payload, ws)
 		}
 	}()
+
+	preloadPlugin()
+
 	for _, selfID := range ws.SelfIDs {
 		ws.Hooks.onSingleBotConnect(selfID)
 	}
@@ -198,7 +201,7 @@ func (ws *WSClient) Listen(handler func([]byte, zero.APICaller)) {
 		select {
 		case <-time.After(1 * time.Second):
 		case <-interrupt:
-			log.Info("[ws] 监听到退出信号, 尝试关闭连接...")
+			log.Info("[ws] 监听到中断信号, 尝试关闭连接...")
 			if ws.Hooks.shouldExecuteDisconnect.Load() {
 				ws.Hooks.onDisconnect(ws.SelfIDs)
 				ws.Hooks.shouldExecuteDisconnect.Store(false)

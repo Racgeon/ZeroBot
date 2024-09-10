@@ -15,6 +15,8 @@ type IPlugin interface {
 	GetPluginInfo() PluginInfo
 	// Start 开启工作
 	Start()
+	// preLoad 插件预加载
+	PreLoad()
 }
 
 var plugins []IPlugin
@@ -28,5 +30,11 @@ func loadPlugin() {
 			plugin.Start()
 			logrus.Infof("[bot] load plugin %s success", plugin.GetPluginInfo().PluginName)
 		}(plugin)
+	}
+}
+
+func preloadPlugin() {
+	for _, plugin := range plugins {
+		plugin.PreLoad()
 	}
 }
