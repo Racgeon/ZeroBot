@@ -214,7 +214,7 @@ func processEventAsync(response []byte, caller APICaller, maxwait time.Duration)
 	ctx := &Ctx{
 		Event:  &event,
 		State:  State{},
-		caller: &messageLogger{msgid: msgid, caller: caller},
+		Caller: &messageLogger{msgid: msgid, caller: caller},
 	}
 	matcherLock.Lock()
 	if hasMatcherListChanged {
@@ -455,7 +455,7 @@ func GetBot(id int64) *Ctx {
 	if !ok {
 		return nil
 	}
-	return &Ctx{caller: caller}
+	return &Ctx{Caller: caller}
 }
 
 // RangeBot 遍历所有bot (Ctx)实例
@@ -463,7 +463,7 @@ func GetBot(id int64) *Ctx {
 // 单次操作返回 true 则继续遍历，否则退出
 func RangeBot(iter func(id int64, ctx *Ctx) bool) {
 	APICallers.Range(func(key int64, value APICaller) bool {
-		return iter(key, &Ctx{caller: value})
+		return iter(key, &Ctx{Caller: value})
 	})
 }
 

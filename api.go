@@ -56,7 +56,7 @@ func (ctx *Ctx) CallAction(action string, params Params) APIResponse {
 		Params: params,
 		SelfId: ctx.Event.SelfID,
 	}
-	rsp, err := ctx.caller.CallApi(req)
+	rsp, err := ctx.Caller.CallApi(req)
 	if err != nil {
 		log.Errorln("[api] 调用", action, "时出现错误: ", err)
 	}

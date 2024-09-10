@@ -15,7 +15,7 @@ type Ctx struct {
 	ma     *Matcher
 	Event  *Event
 	State  State
-	caller APICaller
+	Caller APICaller
 
 	// lazy message
 	once    sync.Once
@@ -29,7 +29,7 @@ func (ctx *Ctx) GetMatcher() *Matcher {
 
 // ExposeCaller as *T, maybe panic if misused
 func ExposeCaller[T any](ctx *Ctx) *T {
-	return (*T)(*(*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(&ctx.caller), unsafe.Sizeof(uintptr(0)))))
+	return (*T)(*(*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(&ctx.Caller), unsafe.Sizeof(uintptr(0)))))
 }
 
 // decoder 反射获取的数据
@@ -119,9 +119,9 @@ func (ctx *Ctx) SendChain(msg ...message.MessageSegment) message.MessageID {
 // Echo 向自身分发虚拟事件
 func (ctx *Ctx) Echo(response []byte) {
 	if BotConfig.RingLen != 0 {
-		evring.processEvent(response, ctx.caller)
+		evring.processEvent(response, ctx.Caller)
 	} else {
-		processEventAsync(response, ctx.caller, BotConfig.MaxProcessTime)
+		processEventAsync(response, ctx.Caller, BotConfig.MaxProcessTime)
 	}
 }
 

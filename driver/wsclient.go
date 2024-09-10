@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,8 +33,8 @@ type WSClient struct {
 	seqMap      seqSyncMap
 	Url         string // ws连接地址
 	AccessToken string
-	selfIDs     []int64
-	OnConnect   func(ctx *zero.Ctx)
+	SelfIDs     []int64
+	Hooks       *Hooks
 }
 
 // NewWebSocketClient 默认Driver，使用正向WS通信
@@ -44,7 +45,8 @@ func NewWebSocketClient(url, accessToken string, selfIDs []int64) *WSClient {
 	return &WSClient{
 		Url:         url,
 		AccessToken: accessToken,
-		selfIDs:     selfIDs,
+		SelfIDs:     selfIDs,
+		Hooks:       NewHooks(),
 	}
 }
 
@@ -53,7 +55,7 @@ func (ws *WSClient) Connect() {
 	log.Infof("[ws] 开始尝试连接到Websocket服务器: %v", ws.Url)
 	header := http.Header{
 		"X-Client-Role": []string{"Universal"},
-		"User-Agent":    []string{"ZeroBot/1.6.3"},
+		"User-Agent":    []string{"ZeroBot/1.7.4"},
 	}
 	if ws.AccessToken != "" {
 		header["Authorization"] = []string{"Bearer " + ws.AccessToken}
@@ -90,7 +92,7 @@ func (ws *WSClient) Connect() {
 		}
 
 		connected := atomic.Int32{}
-		botCnt := int32(len(ws.selfIDs))
+		botCnt := int32(len(ws.SelfIDs))
 		if botCnt == 0 {
 			connected.Store(1)
 		} else {
@@ -102,8 +104,11 @@ func (ws *WSClient) Connect() {
 		for {
 			select {
 			case <-ctx.Done():
+				if len(ws.SelfIDs) > 1 {
+					log.Warnf("[ws] 与Websocket服务器连接超时，%d个bot连接失败", connected.Load())
+				}
 				cancel()
-				return
+				goto connected
 			default:
 				err = ws.conn.ReadJSON(&rsp)
 				if err != nil {
@@ -115,58 +120,97 @@ func (ws *WSClient) Connect() {
 				selfId := rsp.SelfID
 				zero.APICallers.Store(selfId, ws) // 添加Caller到 APICaller list...
 				log.Infof("[ws] 连接Websocket服务器: %s 成功, 账号: %d", ws.Url, selfId)
+
 				connected.Add(-1)
 				if connected.Load() == 0 {
 					cancel()
+					goto connected
 				}
 			}
 		}
 	}
+connected:
+	ws.Hooks.onConnectionEstablished()
+	ws.Hooks.shouldExecuteDisconnect.Store(true)
 }
 
 // Listen 开始监听事件
 func (ws *WSClient) Listen(handler func([]byte, zero.APICaller)) {
-	for {
-		t, payload, err := ws.conn.ReadMessage()
-		if err != nil { // reconnect
-			for _, selfID := range ws.selfIDs {
-				zero.APICallers.Delete(selfID) // 断开从apicaller中删除
-			}
-			log.Warn("[ws] Websocket服务器连接断开...")
-			time.Sleep(time.Millisecond * time.Duration(3))
-			ws.Connect()
-			continue
-		}
-		if t != websocket.TextMessage {
-			continue
-		}
-		rsp := gjson.Parse(helper.BytesToString(payload))
-		if rsp.Get("echo").Exists() { // 存在echo字段，是api调用的返回
-			log.Debug("[ws] 接收到API调用返回: ", strings.TrimSpace(helper.BytesToString(payload)))
-			if c, ok := ws.seqMap.LoadAndDelete(rsp.Get("echo").Uint()); ok {
-				c <- zero.APIResponse{ // 发送api调用响应
-					Status:  rsp.Get("status").String(),
-					Data:    rsp.Get("data"),
-					Msg:     rsp.Get("msg").Str,
-					Wording: rsp.Get("wording").Str,
-					RetCode: rsp.Get("retcode").Int(),
-					Echo:    rsp.Get("echo").Uint(),
+	go func() {
+		for {
+			t, payload, err := ws.conn.ReadMessage()
+			if err != nil { // reconnect
+				for _, selfID := range ws.SelfIDs {
+					zero.APICallers.Delete(selfID) // 断开从apicaller中删除
 				}
-				close(c) // channel only use once
+				log.Warn("[ws] Websocket服务器连接断开...")
+				if ws.Hooks.shouldExecuteDisconnect.Load() {
+					ws.Hooks.onDisconnect(ws.SelfIDs)
+				}
+				ws.Hooks.shouldExecuteDisconnect.Store(false)
+				time.Sleep(time.Millisecond * time.Duration(3))
+				ws.Connect()
+				continue
 			}
-			continue
+			if t != websocket.TextMessage {
+				continue
+			}
+			rsp := gjson.Parse(helper.BytesToString(payload))
+			if rsp.Get("echo").Exists() { // 存在echo字段，是api调用的返回
+				log.Debug("[ws] 接收到API调用返回: ", strings.TrimSpace(helper.BytesToString(payload)))
+				if c, ok := ws.seqMap.LoadAndDelete(rsp.Get("echo").Uint()); ok {
+					c <- zero.APIResponse{ // 发送api调用响应
+						Status:  rsp.Get("status").String(),
+						Data:    rsp.Get("data"),
+						Msg:     rsp.Get("msg").Str,
+						Wording: rsp.Get("wording").Str,
+						RetCode: rsp.Get("retcode").Int(),
+						Echo:    rsp.Get("echo").Uint(),
+					}
+					close(c) // channel only use once
+				}
+				continue
+			}
+			if rsp.Get("meta_event_type").Str == "heartbeat" { // 忽略心跳事件
+				continue
+			}
+			if rsp.Get("sub_type").Str == "connect" { //处理连接事件
+				selfId := rsp.Get("self_id").Int()
+				zero.APICallers.Store(selfId, ws) // 添加Caller到 APICaller list...
+				log.Infof("[ws] 连接Websocket服务器: %s 成功, 账号: %d", ws.Url, selfId)
+				ws.Hooks.onSingleBotConnect(selfId)
+				continue
+			}
+			log.Debug("[ws] 接收到事件: ", helper.BytesToString(payload))
+			handler(payload, ws)
 		}
-		if rsp.Get("meta_event_type").Str == "heartbeat" { // 忽略心跳事件
-			continue
+	}()
+	for _, selfID := range ws.SelfIDs {
+		ws.Hooks.onSingleBotConnect(selfID)
+	}
+	ws.Hooks.onAllBotConnected(ws.SelfIDs)
+
+	loadPlugin()
+
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt)
+	for {
+		select {
+		case <-time.After(1 * time.Second):
+		case <-interrupt:
+			log.Info("[ws] 监听到退出信号, 尝试关闭连接...")
+			if ws.Hooks.shouldExecuteDisconnect.Load() {
+				ws.Hooks.onDisconnect(ws.SelfIDs)
+				ws.Hooks.shouldExecuteDisconnect.Store(false)
+			}
+			err := ws.conn.Close()
+			if err != nil {
+				log.Error("[ws] 关闭连接失败: ", err.Error())
+			} else {
+				log.Info("[ws] 已关闭连接")
+				os.Exit(0)
+			}
 		}
-		if rsp.Get("sub_type").Str == "connect" { //处理连接事件
-			selfId := rsp.Get("self_id").Int()
-			zero.APICallers.Store(selfId, ws) // 添加Caller到 APICaller list...
-			log.Infof("[ws] 连接Websocket服务器: %s 成功, 账号: %d", ws.Url, selfId)
-			continue
-		}
-		log.Debug("[ws] 接收到事件: ", helper.BytesToString(payload))
-		handler(payload, ws)
 	}
 }
 
@@ -189,7 +233,6 @@ func (ws *WSClient) CallApi(req zero.APIRequest) (zero.APIResponse, error) {
 		return nullResponse, err
 	}
 	log.Debug("[ws] 向服务器发送请求: ", &req)
-
 	select { // 等待数据返回
 	case rsp, ok := <-ch:
 		if !ok {
