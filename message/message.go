@@ -217,6 +217,19 @@ func Image(file string, summary ...interface{}) MessageSegment {
 	return m
 }
 
+func UrlImage(url string, summary ...interface{}) MessageSegment {
+	m := MessageSegment{
+		Type: "image",
+		Data: map[string]string{
+			"url": url,
+		},
+	}
+	if len(summary) > 0 {
+		m.Data["summary"] = fmt.Sprint(summary...)
+	}
+	return m
+}
+
 // ImageBytes 普通图片
 // https://github.com/botuniverse/onebot-11/tree/master/message/segment.md#%E5%9B%BE%E7%89%87
 func ImageBytes(data []byte) MessageSegment {
