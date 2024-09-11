@@ -455,7 +455,7 @@ func GetBot(id int64) *Ctx {
 	if !ok {
 		return nil
 	}
-	return &Ctx{Caller: caller}
+	return &Ctx{Caller: caller, Event: &Event{SelfID: id}}
 }
 
 // RangeBot 遍历所有bot (Ctx)实例
