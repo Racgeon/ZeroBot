@@ -55,7 +55,6 @@ func main() {
 
 - [catsworld/qq-bot-api](https://github.com/catsworld/qq-bot-api): Golang bindings for the Coolq HTTP API Plugin
 
-
 同时感谢以下开发者对 ZeroBot 作出的贡献：
 
 <a href="https://github.com/wdvxdr1123/ZeroBot/graphs/contributors">
