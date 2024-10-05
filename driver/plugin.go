@@ -1,6 +1,9 @@
 package driver
 
-import "github.com/sirupsen/logrus"
+import (
+	"github.com/sirupsen/logrus"
+	"sync"
+)
 
 type PluginInfo struct {
 	Author     string // 作者
@@ -15,7 +18,7 @@ type IPlugin interface {
 	GetPluginInfo() PluginInfo
 	// Start 开启工作
 	Start()
-	// preLoad 插件预加载
+	// PreLoad 插件预加载
 	PreLoad()
 }
 
@@ -27,6 +30,11 @@ func RegisterPlugin(plugin IPlugin) {
 func loadPlugin() {
 	for _, plugin := range plugins {
 		go func(plugin IPlugin) {
+			defer func() {
+				if r := recover(); r != nil {
+					logrus.Errorf("[bot] load plugin %s failed: %v", plugin.GetPluginInfo().PluginName, r)
+				}
+			}()
 			plugin.Start()
 			logrus.Infof("[bot] load plugin %s success", plugin.GetPluginInfo().PluginName)
 		}(plugin)
@@ -34,7 +42,20 @@ func loadPlugin() {
 }
 
 func preloadPlugin() {
-	for _, plugin := range plugins {
-		plugin.PreLoad()
+	wg := sync.WaitGroup{}
+	wg.Add(len(plugins))
+	for i, plugin := range plugins {
+		go func(i int, plugin IPlugin, plugins *[]IPlugin) {
+			defer func() {
+				if r := recover(); r != nil {
+					logrus.Errorf("[bot] load plugin %s failed: %v", plugin.GetPluginInfo().PluginName, r)
+					*plugins = append((*plugins)[:i], (*plugins)[i+1:]...)
+					wg.Done()
+				}
+			}()
+			plugin.PreLoad()
+			wg.Done()
+		}(i, plugin, &plugins)
 	}
+	wg.Wait()
 }

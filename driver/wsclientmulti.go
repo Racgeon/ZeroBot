@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"context"
 	"encoding/base64"
 	"io"
 	"net"
@@ -20,33 +21,33 @@ import (
 	"github.com/wdvxdr1123/ZeroBot/utils/helper"
 )
 
-var (
-	nullResponse = zero.APIResponse{}
-)
-
-// WSClient ...
-type WSClient struct {
+// MultiWSClient ...
+type MultiWSClient struct {
 	seq         uint64
 	conn        *websocket.Conn
 	mu          sync.Mutex // 写锁
 	seqMap      seqSyncMap
 	Url         string // ws连接地址
 	AccessToken string
-	selfID      int64
-	Hooks       *Hooks
+	SelfIDs     []int64
+	Hooks       *MultiHooks
 }
 
-// NewWebSocketClient 默认Driver，使用正向WS通信
-func NewWebSocketClient(url, accessToken string) *WSClient {
-	return &WSClient{
+// NewMultiWebSocketClient 默认Driver，使用正向WS通信
+func NewMultiWebSocketClient(url, accessToken string, selfIDs []int64) *MultiWSClient {
+	if selfIDs == nil {
+		selfIDs = []int64{}
+	}
+	return &MultiWSClient{
 		Url:         url,
 		AccessToken: accessToken,
-		Hooks:       NewHooks(),
+		SelfIDs:     selfIDs,
+		Hooks:       NewMultiHooks(),
 	}
 }
 
 // Connect 连接ws服务端
-func (ws *WSClient) Connect() {
+func (ws *MultiWSClient) Connect() {
 	log.Infof("[ws] 开始尝试连接到Websocket服务器: %v", ws.Url)
 	header := http.Header{
 		"X-Client-Role": []string{"Universal"},
@@ -81,36 +82,68 @@ func (ws *WSClient) Connect() {
 			continue
 		}
 		ws.conn = conn
-		ws.Hooks.onConnectionEstablished()
 		_ = res.Body.Close()
 		var rsp struct {
 			SelfID int64 `json:"self_id"`
 		}
-		err = ws.conn.ReadJSON(&rsp)
-		if err != nil {
-			log.Warnf("[ws] 与Websocket服务器 %v 握手时出现错误: %v", ws.Url, err)
-			time.Sleep(2 * time.Second) // 等待两秒后重新连接
-			continue
+
+		connected := atomic.Int32{}
+		botCnt := int32(len(ws.SelfIDs))
+		if botCnt == 0 {
+			connected.Store(1)
+		} else {
+			connected.Store(botCnt)
 		}
-		ws.selfID = rsp.SelfID
-		zero.APICallers.Store(ws.selfID, ws) // 添加Caller到 APICaller list...
-		log.Infof("[ws] 连接Websocket服务器: %s 成功, 账号: %d", ws.Url, rsp.SelfID)
-		break
+
+		timeout := 5 * time.Second
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		for {
+			select {
+			case <-ctx.Done():
+				if len(ws.SelfIDs) > 1 {
+					log.Warnf("[ws] 与Websocket服务器连接超时，%d个bot连接失败", connected.Load())
+				}
+				cancel()
+				goto connected
+			default:
+				err = ws.conn.ReadJSON(&rsp)
+				if err != nil {
+					log.Warnf("[ws] 与Websocket服务器 %v 握手时出现错误: %v", ws.Url, err)
+					time.Sleep(2 * time.Second) // 等待两秒后重新连接
+					continue
+				}
+
+				selfId := rsp.SelfID
+				zero.APICallers.Store(selfId, ws) // 添加Caller到 APICaller list...
+				log.Infof("[ws] 连接Websocket服务器: %s 成功, 账号: %d", ws.Url, selfId)
+
+				connected.Add(-1)
+				if connected.Load() == 0 {
+					cancel()
+					goto connected
+				}
+			}
+		}
 	}
+connected:
+	ws.Hooks.onConnectionEstablished()
+	ws.Hooks.disconnectLock.Store(true)
 }
 
 // Listen 开始监听事件
-func (ws *WSClient) Listen(handler func([]byte, zero.APICaller)) {
+func (ws *MultiWSClient) Listen(handler func([]byte, zero.APICaller)) {
 	go func() {
 		for {
 			t, payload, err := ws.conn.ReadMessage()
 			if err != nil { // reconnect
-				zero.APICallers.Delete(ws.selfID) // 断开从apicaller中删除
-				log.Warn("[ws] Websocket服务器连接断开...")
-				if ws.Hooks.diconnectLock.Load() {
-					ws.Hooks.onDisconnect(ws.selfID)
+				for _, selfID := range ws.SelfIDs {
+					zero.APICallers.Delete(selfID) // 断开从apicaller中删除
 				}
-				ws.Hooks.diconnectLock.Store(false)
+				log.Warn("[ws] Websocket服务器连接断开...")
+				if ws.Hooks.disconnectLock.Load() {
+					ws.Hooks.onDisconnect(ws.SelfIDs)
+				}
+				ws.Hooks.disconnectLock.Store(false)
 				time.Sleep(time.Millisecond * time.Duration(3))
 				ws.Connect()
 				continue
@@ -137,6 +170,13 @@ func (ws *WSClient) Listen(handler func([]byte, zero.APICaller)) {
 			if rsp.Get("meta_event_type").Str == "heartbeat" { // 忽略心跳事件
 				continue
 			}
+			if rsp.Get("sub_type").Str == "connect" { //处理连接事件
+				selfId := rsp.Get("self_id").Int()
+				zero.APICallers.Store(selfId, ws) // 添加Caller到 APICaller list...
+				log.Infof("[ws] 连接Websocket服务器: %s 成功, 账号: %d", ws.Url, selfId)
+				ws.Hooks.onSingleBotConnect(selfId)
+				continue
+			}
 			log.Debug("[ws] 接收到事件: ", helper.BytesToString(payload))
 			handler(payload, ws)
 		}
@@ -144,7 +184,10 @@ func (ws *WSClient) Listen(handler func([]byte, zero.APICaller)) {
 
 	preloadPlugin()
 
-	ws.Hooks.onBotConnect(ws.selfID)
+	for _, selfID := range ws.SelfIDs {
+		ws.Hooks.onSingleBotConnect(selfID)
+	}
+	ws.Hooks.onAllBotConnected(ws.SelfIDs)
 
 	loadPlugin()
 
@@ -155,9 +198,9 @@ func (ws *WSClient) Listen(handler func([]byte, zero.APICaller)) {
 		case <-time.After(1 * time.Second):
 		case <-interrupt:
 			log.Info("[ws] 监听到中断信号, 尝试关闭连接...")
-			if ws.Hooks.diconnectLock.Load() {
-				ws.Hooks.onDisconnect(ws.selfID)
-				ws.Hooks.diconnectLock.Store(false)
+			if ws.Hooks.disconnectLock.Load() {
+				ws.Hooks.onDisconnect(ws.SelfIDs)
+				ws.Hooks.disconnectLock.Store(false)
 			}
 			err := ws.conn.Close()
 			if err != nil {
@@ -170,12 +213,12 @@ func (ws *WSClient) Listen(handler func([]byte, zero.APICaller)) {
 	}
 }
 
-func (ws *WSClient) nextSeq() uint64 {
+func (ws *MultiWSClient) nextSeq() uint64 {
 	return atomic.AddUint64(&ws.seq, 1)
 }
 
 // CallApi 发送ws请求
-func (ws *WSClient) CallApi(req zero.APIRequest) (zero.APIResponse, error) {
+func (ws *MultiWSClient) CallApi(req zero.APIRequest) (zero.APIResponse, error) {
 	ch := make(chan zero.APIResponse, 1)
 	req.Echo = ws.nextSeq()
 	ws.seqMap.Store(req.Echo, ch)
@@ -189,7 +232,6 @@ func (ws *WSClient) CallApi(req zero.APIRequest) (zero.APIResponse, error) {
 		return nullResponse, err
 	}
 	log.Debug("[ws] 向服务器发送请求: ", &req)
-
 	select { // 等待数据返回
 	case rsp, ok := <-ch:
 		if !ok {

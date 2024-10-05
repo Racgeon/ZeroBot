@@ -111,6 +111,36 @@ func (ctx *Ctx) Send(msg interface{}) message.MessageID {
 	return message.NewMessageIDFromInteger(ctx.SendPrivateMessage(event.UserID, msg))
 }
 
+// Reply 快捷发送回复消息
+func (ctx *Ctx) Reply(msg interface{}) message.MessageID {
+	messageID := ctx.Event.MessageID
+	event := ctx.Event
+	m, ok := msg.(message.Message)
+	if !ok {
+		var p *message.Message
+		p, ok = msg.(*message.Message)
+		if ok {
+			m = *p
+			m = append(message.Message{message.Reply(messageID)}, m...)
+		}
+	} else {
+		msg = append(message.Message{message.Reply(messageID)}, m...)
+	}
+	if ok && len(m) > 0 && m[0].Type == "node" && event.DetailType != "guild" {
+		if event.GroupID != 0 {
+			return message.NewMessageIDFromInteger(ctx.SendGroupForwardMessage(event.GroupID, m).Get("message_id").Int())
+		}
+		return message.NewMessageIDFromInteger(ctx.SendPrivateForwardMessage(event.UserID, m).Get("message_id").Int())
+	}
+	if event.DetailType == "guild" {
+		return message.NewMessageIDFromString(ctx.SendGuildChannelMessage(event.GuildID, event.ChannelID, msg))
+	}
+	if event.GroupID != 0 {
+		return message.NewMessageIDFromInteger(ctx.SendGroupMessage(event.GroupID, msg))
+	}
+	return message.NewMessageIDFromInteger(ctx.SendPrivateMessage(event.UserID, msg))
+}
+
 // SendChain 快捷发送消息/合并转发-消息链
 func (ctx *Ctx) SendChain(msg ...message.MessageSegment) message.MessageID {
 	return ctx.Send((message.Message)(msg))

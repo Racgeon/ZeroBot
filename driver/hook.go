@@ -7,31 +7,25 @@ import (
 )
 
 type Hooks struct {
-	connectionEstablished   []func() error
-	singleBotConnected      map[int64][]func(ctx *zero.Ctx) error
-	allBotConnected         []func(ctx []*zero.Ctx) error
-	disConnected            []func(ctx []*zero.Ctx) error
-	shouldExecuteDisconnect atomic.Bool
+	connectionEstablished []func() error
+	botConnected          []func(ctx *zero.Ctx) error
+	disConnected          []func(ctx *zero.Ctx) error
+	diconnectLock         atomic.Bool
 }
 
 func NewHooks() *Hooks {
 	return &Hooks{
-		connectionEstablished:   make([]func() error, 0),
-		singleBotConnected:      make(map[int64][]func(ctx *zero.Ctx) error),
-		allBotConnected:         make([]func(ctx []*zero.Ctx) error, 0),
-		disConnected:            make([]func(ctx []*zero.Ctx) error, 0),
-		shouldExecuteDisconnect: atomic.Bool{},
+		connectionEstablished: make([]func() error, 0),
+		botConnected:          make([]func(ctx *zero.Ctx) error, 0),
+		disConnected:          make([]func(ctx *zero.Ctx) error, 0),
+		diconnectLock:         atomic.Bool{},
 	}
 }
-func (hooks *Hooks) AddSingleBotConnectHook(selfId int64, onBotConnect ...func(ctx *zero.Ctx) error) {
-	hooks.singleBotConnected[selfId] = append(hooks.singleBotConnected[selfId], onBotConnect...)
+func (hooks *Hooks) AddBotConnectHook(onBotConnect ...func(ctx *zero.Ctx) error) {
+	hooks.botConnected = append(hooks.botConnected, onBotConnect...)
 }
 
-func (hooks *Hooks) AddAllBotConnectHook(onAllBotConnected ...func(ctx []*zero.Ctx) error) {
-	hooks.allBotConnected = append(hooks.allBotConnected, onAllBotConnected...)
-}
-
-func (hooks *Hooks) AddBotDisconnectHook(onBotDisconnect ...func(ctx []*zero.Ctx) error) {
+func (hooks *Hooks) AddBotDisconnectHook(onBotDisconnect ...func(ctx *zero.Ctx) error) {
 	hooks.disConnected = append(hooks.disConnected, onBotDisconnect...)
 }
 
@@ -61,14 +55,14 @@ func (hooks *Hooks) onConnectionEstablished() {
 		}
 	}
 }
-func (hooks *Hooks) onSingleBotConnect(selfID int64) {
+func (hooks *Hooks) onBotConnect(selfID int64) {
 	defer func() {
 		if err := recover(); err != nil {
 			log.Fatalf("[bot] 执行单个bot连接钩子函数出现错误：%v", err)
 		}
 	}()
 
-	onConnected := hooks.singleBotConnected[selfID]
+	onConnected := hooks.botConnected
 	ctx := NewHookCtx(selfID)
 	for _, fun := range onConnected {
 		err := fun(ctx)
@@ -78,44 +72,16 @@ func (hooks *Hooks) onSingleBotConnect(selfID int64) {
 	}
 }
 
-func (hooks *Hooks) onAllBotConnected(selfIDs []int64) {
+func (hooks *Hooks) onDisconnect(selfID int64) {
 	defer func() {
-		if err := recover(); err != nil {
-			log.Fatalf("[bot] 执行所有bot连接钩子函数出现错误：%v", err)
+		if r := recover(); r != nil {
+			log.Errorf("[bot] 执行断开连接钩子函数出现错误：%v", r)
 		}
 	}()
 
-	var ctxs []*zero.Ctx
-	for _, selfID := range selfIDs {
-		ctx := NewHookCtx(selfID)
-		ctxs = append(ctxs, ctx)
-	}
-
-	for _, fun := range hooks.allBotConnected {
-		err := fun(ctxs)
-		if err != nil {
-			log.Fatalf("[bot] 执行所有bot连接钩子函数出现错误：%v", err)
-		}
-	}
-}
-
-func (hooks *Hooks) onDisconnect(selfIDs []int64) {
-	defer func() {
-		if err := recover(); err != nil {
-			if err := recover(); err != nil {
-				log.Errorf("[bot] 执行断开连接钩子函数出现错误：%v", err)
-			}
-		}
-	}()
-
-	var ctxs []*zero.Ctx
-	for _, selfID := range selfIDs {
-		ctx := NewHookCtx(selfID)
-		ctxs = append(ctxs, ctx)
-	}
-
+	ctx := NewHookCtx(selfID)
 	for _, fun := range hooks.disConnected {
-		err := fun(ctxs)
+		err := fun(ctx)
 		if err != nil {
 			log.Errorf("[bot] 执行断开连接钩子函数出现错误：%v", err)
 		}
